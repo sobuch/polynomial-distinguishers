@@ -200,12 +200,19 @@ class BoolRunner:
                 cdegs = listize(jsonpath('$.cdeg', cvar, True)) or [None]
                 pcli = ['--block', '--degree', '--combine-deg']
                 vinfo = ['', '', '']
-                iterator = itertools.product(blocks, degs, cdegs)
+                iterator = itertools.product(cdegs, blocks, degs)
 
                 for el in iterator:
+                    el = (el[1], el[2], el[0])
+
                     c = ' '.join([(('%s %s') % (pcli[ix], dt)) for (ix, dt) in enumerate(el) if dt is not None])
                     vi = '-'.join([(('%s%s') % (vinfo[ix], dt)).strip() for (ix, dt) in enumerate(el) if dt is not None])
                     ccli0 = ('%s %s' % (ccli, c)).strip()
+
+                    if el[2] == cdegs[0]:
+                        ccli0 += ' --save-first-phase %s_%s.pckl' % (el[0], el[1])
+                    else:
+                        ccli0 += ' --reuse-first-phase %s_%s.pckl' % (el[0], el[1])
 
                     yield BoolJob(ccli0, name, vi)
 

@@ -14,6 +14,7 @@ import random
 import re
 import os
 import sys
+import pickle
 from functools import reduce
 
 import argparse
@@ -82,6 +83,9 @@ class HWAnalysis(object):
         # Buffers - allocated during computation for fast copy evaluation
         self.comb_res = None
         self.comb_subres = None
+
+        self.reuse_first_phase = None
+        self.save_first_phase = None
 
     def init(self):
         """
@@ -175,7 +179,7 @@ class HWAnalysis(object):
         hws2, hws_input = None, None
 
         # Evaluate all terms of degrees 1..deg
-        if self.all_deg_compute:
+        if self.all_deg_compute and not self.reuse_first_phase:
             logger.info('Evaluating all terms, bitlen: %d, bytes: %d' % (ln, ln//8))
             hws2 = self.term_eval.eval_all_terms(self.deg)
             logger.info('Done: %s' % [len(x) for x in hws2])
@@ -445,61 +449,70 @@ class HWAnalysis(object):
             self.last_res = r
             return r
 
-        probab = [self.term_eval.expp_term_deg(deg) for deg in range(0, self.deg + 1)]
-        exp_count = [num_evals * x for x in probab]
-        logger.info('Probabilities: %s, expected count: %s' % (probab, exp_count))
+        # Reuse previously stored results = no computation
+        if self.reuse_first_phase:
+            with open(self.reuse_first_phase, 'rb') as f:
+                top_terms = pickle.load(f)
+        else:
+            probab = [self.term_eval.expp_term_deg(deg) for deg in range(0, self.deg + 1)]
+            exp_count = [num_evals * x for x in probab]
+            logger.info('Probabilities: %s, expected count: %s' % (probab, exp_count))
 
-        top_terms = []
-        mean_zscores = []
-        zscores = [[0] * len(x) for x in hws]
-        zscores_ref = [[0] * len(x) for x in hws]
-        start_deg = self.deg if self.do_only_top_deg else 1
-        for deg in range(start_deg, self.deg+1):
-            # Reference computation - all zscore list
-            # Used only for special theory check, not during normal computation
+            top_terms = []
+            mean_zscores = []
+            zscores = [[0] * len(x) for x in hws]
+            zscores_ref = [[0] * len(x) for x in hws]
+            start_deg = self.deg if self.do_only_top_deg else 1
+            for deg in range(start_deg, self.deg+1):
+                # Reference computation - all zscore list
+                # Used only for special theory check, not during normal computation
+                if self.all_zscore_comp:
+                    mean_zscore, fails = self.all_zscore_base_poly(deg, zscores, zscores_ref, num_evals,
+                                                                   hws, ref_hws, exp_count)
+                    mean_zscores.append(mean_zscore)
+                    continue
+
+                # Compute (zscore, idx)
+                # Memory optimizations:
+                #  1. for ranking avoid z-score computation - too expensive.
+                #  2. add polynomials to the heap, keep there max 1-10k elements.
+                mean_zscore, fails = self.best_zscored_base_poly(deg, zscores, zscores_ref, num_evals,
+                                                                 hws, ref_hws, exp_count)
+
+                # Selecting TOP k polynomials for further combinations
+                for idx, x in enumerate(zscores[deg][0:15]):
+                    fail = 'x' if self.zscore_thresh and abs(x[0]) > self.zscore_thresh else ' '
+                    self.tprint(' - zscore[deg=%d]: %+05.5f, %+05.5f, observed: %08d, expected: %08d %s idx: %6d, term: %s'
+                                % (deg, x[0], zscores_ref[deg][idx]-x[0], x[2],
+                                   exp_count[deg], fail, x[1], self.unrank(deg, x[1])))
+
+                # Take top X best polynomials
+                if self.top_k is None:
+                    continue
+
+                logger.info('Comb...')
+                if self.combine_all_deg or deg == self.deg:
+                    top_terms += [self.unrank(deg, x[1]) for x in zscores[deg][0: (None if self.top_k < 0 else self.top_k)]]
+
+                    if self.comb_random > 0:
+                        random_subset = random.sample(zscores[deg], self.comb_random)
+                        top_terms += [self.unrank(deg, x[1]) for x in random_subset]
+
+                logger.info('Stats...')
+
+                self.tprint('Mean zscore[deg=%d]: %s' % (deg, mean_zscore))
+                if fails:
+                    fails_fraction = float(fails) / len(zscores[deg])
+                    self.tprint('Num of fails[deg=%d]: %s = %02f.5%%' % (deg, fails, 100.0*fails_fraction))
+
             if self.all_zscore_comp:
-                mean_zscore, fails = self.all_zscore_base_poly(deg, zscores, zscores_ref, num_evals,
-                                                               hws, ref_hws, exp_count)
-                mean_zscores.append(mean_zscore)
-                continue
+                self.all_zscore_list = zscores
+                self.all_zscore_means = mean_zscores
+                return
 
-            # Compute (zscore, idx)
-            # Memory optimizations:
-            #  1. for ranking avoid z-score computation - too expensive.
-            #  2. add polynomials to the heap, keep there max 1-10k elements.
-            mean_zscore, fails = self.best_zscored_base_poly(deg, zscores, zscores_ref, num_evals,
-                                                             hws, ref_hws, exp_count)
-
-            # Selecting TOP k polynomials for further combinations
-            for idx, x in enumerate(zscores[deg][0:15]):
-                fail = 'x' if self.zscore_thresh and abs(x[0]) > self.zscore_thresh else ' '
-                self.tprint(' - zscore[deg=%d]: %+05.5f, %+05.5f, observed: %08d, expected: %08d %s idx: %6d, term: %s'
-                            % (deg, x[0], zscores_ref[deg][idx]-x[0], x[2],
-                               exp_count[deg], fail, x[1], self.unrank(deg, x[1])))
-
-            # Take top X best polynomials
-            if self.top_k is None:
-                continue
-
-            logger.info('Comb...')
-            if self.combine_all_deg or deg == self.deg:
-                top_terms += [self.unrank(deg, x[1]) for x in zscores[deg][0: (None if self.top_k < 0 else self.top_k)]]
-
-                if self.comb_random > 0:
-                    random_subset = random.sample(zscores[deg], self.comb_random)
-                    top_terms += [self.unrank(deg, x[1]) for x in random_subset]
-
-            logger.info('Stats...')
-
-            self.tprint('Mean zscore[deg=%d]: %s' % (deg, mean_zscore))
-            if fails:
-                fails_fraction = float(fails) / len(zscores[deg])
-                self.tprint('Num of fails[deg=%d]: %s = %02f.5%%' % (deg, fails, 100.0*fails_fraction))
-
-        if self.all_zscore_comp:
-            self.all_zscore_list = zscores
-            self.all_zscore_means = mean_zscores
-            return
+            if self.save_first_phase:
+                with open(self.save_first_phase, 'wb') as f:
+                    pickle.dump(top_terms, f)
 
         if self.top_k is None:
             return
@@ -769,6 +782,9 @@ class Booltest(object):
         self.timer_data_bins = timer.Timer(start=False)
         self.timer_process = timer.Timer(start=False)
 
+        self.reuse_first_phase = None
+        self.save_first_phase = None
+
     def defset(self, val, default=None):
         return val if val is not None else default
 
@@ -1013,6 +1029,9 @@ class Booltest(object):
         self.json_top = self.args.json_top
         self.json_nice = self.args.json_nice
 
+        self.reuse_first_phase = self.args.reuse_first_phase
+        self.save_first_phase = self.args.save_first_phase
+
     def setup_hwanalysis(self, deg, top_comb, top_k, all_deg, zscore_thresh):
         hwanalysis = HWAnalysis()
         hwanalysis.deg = deg
@@ -1038,6 +1057,9 @@ class Booltest(object):
 
         # compute classical analysis only if there are no input polynomials
         hwanalysis.all_deg_compute = len(self.input_poly) == 0
+
+        hwanalysis.reuse_first_phase = self.reuse_first_phase
+        hwanalysis.save_first_phase = self.save_first_phase
         return hwanalysis
 
     def build_poly_sort_index(self, poly):
@@ -1537,6 +1559,12 @@ class Booltest(object):
 
         parser.add_argument('--log-prints', dest='log_prints', action='store_const', const=True, default=False,
                             help='Do not write info logs to stdout, log to stderr instead')
+
+        parser.add_argument('--reuse-first-phase', dest='reuse_first_phase',
+                            help='File to load saved first phase results from')
+
+        parser.add_argument('--save-first-phase', dest='save_first_phase',
+                            help='File to use to save first phase results')
 
         return parser
 
