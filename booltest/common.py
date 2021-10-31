@@ -686,6 +686,10 @@ class TermEval(object):
         self.bbase = None
         self.base_buff_size = 4096
 
+        self.top_monomial_bitarrays = dict()
+        self.cached_monomial_combs = []
+        self.cached_monomial_combs_bitarrays = []
+
     def base_size(self):
         """
         Returns base size of the vector - same as size of the base
@@ -1215,6 +1219,16 @@ class TermEval(object):
 
         return hws
 
+    def eval_monomial_cached(self, monomial):
+        if tuple(monomial) in self.top_monomial_bitarrays:
+            return self.top_monomial_bitarrays[tuple(monomial)]
+
+        res = self.eval_poly([monomial])
+
+        self.top_monomial_bitarrays[tuple(monomial)] = res
+
+        return res
+
     def eval_poly_hw(self, poly, res=None, subres=None):
         """
         Evaluates polynomial Hamming weight on the input-precomputed base
@@ -1224,9 +1238,31 @@ class TermEval(object):
         :return:
         """
         if FAST_IMPL_PH4:
+            if (len(poly) == 1):
+                return self.bbase.eval_poly_hw(poly)
+
+            while self.cached_monomial_combs and self.cached_monomial_combs[-1] != poly[:len(self.cached_monomial_combs)]:
+                del self.cached_monomial_combs[-1]
+                del self.cached_monomial_combs_bitarrays[-1]
+
+            if self.cached_monomial_combs:
+                current_term = len(self.cached_monomial_combs)
+                current_bitstream = self.cached_monomial_combs_bitarrays[-1].copy()
+            else:
+                current_term = 1
+                current_bitstream = self.eval_monomial_cached(poly[0]).copy()
+
+            while current_term < len(poly) - 1:
+                current_bitstream ^= self.eval_monomial_cached(poly[current_term])
+                current_term += 1
+                self.cached_monomial_combs.append(poly[:current_term])
+                self.cached_monomial_combs_bitarrays.append(current_bitstream)
+
+            return current_bitstream.fast_hw_xor(self.eval_monomial_cached(poly[-1]))
+
             # return self.hw(self.eval_poly(poly, res=res, subres=subres))
             # return bitarray.eval_polynomial_hw(self.base, poly)
-            return self.bbase.eval_poly_hw(poly)
+            #return self.bbase.eval_poly_hw(poly)
         else:
             return self.hw(self.eval_poly(poly, res=res, subres=subres))
 
