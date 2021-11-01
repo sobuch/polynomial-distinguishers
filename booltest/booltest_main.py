@@ -596,11 +596,17 @@ class HWAnalysis(object):
         :param ref_hws: reference results
         :return:
         """
+        expp = None
         iterator = common.term_generator(top_comb_cur, len(top_terms) - 1, self.prob_comb)
         for idx, places in enumerate(iterator):
             poly = poly_builder(places, top_terms)
-            expp = self.term_eval.expp_poly(poly)
-            exp_cnt = num_evals * expp
+            terms = [term for monom in poly for term in monom]
+            if len(set(terms)) != len(terms):
+                continue
+
+            if not expp:
+                expp = self.term_eval.expp_poly(poly)
+                exp_cnt = num_evals * expp
             if exp_cnt == 0:
                 continue
 
